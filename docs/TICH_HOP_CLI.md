@@ -7,9 +7,9 @@ Tài liệu cho người gắn `vtranscript` vào một pipeline có sẵn (cron
 Cần Python 3.10 trở lên. Không cần GPU và không cần cài ffmpeg riêng (gói `imageio-ffmpeg` mang theo).
 
 ```bash
-uv tool install git+https://github.com/tiencd123456/video_transcript   # hoặc: pipx install git+...
+uv tool install git+https://github.com/AZDAG-IT/video_transcript   # hoặc: pipx install git+...
 mkdir -p ~/.config/vtranscript
-curl -fsSL https://raw.githubusercontent.com/tiencd123456/video_transcript/main/.env.example \
+curl -fsSL https://raw.githubusercontent.com/AZDAG-IT/video_transcript/main/.env.example \
   > ~/.config/vtranscript/.env && chmod 600 ~/.config/vtranscript/.env
 # sửa ~/.config/vtranscript/.env: điền OPENROUTER_API_KEY
 ```
