@@ -68,6 +68,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--max-frames", type=int, default=50)
     g.add_argument("--no-review", action="store_true", help="Bỏ vòng soát toàn cục")
     g.add_argument("--verbatim", action="store_true", help="Giữ nguyên từ đệm (à, ờ, kiểu như là...)")
+    g.add_argument("--knowledge", type=Path, default=None,
+                   help="Thư mục sổ tay tự học (mặc định VT_KNOWLEDGE_DIR hoặc ~/.config/vtranscript/kien_thuc)")
+    g.add_argument("--no-learn", action="store_true", help="Dùng sổ tay nhưng không học thêm từ video này")
+    g.add_argument("--no-knowledge", action="store_true",
+                   help="Không dùng sổ tay tự học (luật theo thể loại có sẵn trong gói vẫn áp dụng)")
     g.add_argument("--summary-lang", default="tiếng Việt")
     g.add_argument("--no-summary-images", action="store_true",
                    help="Không chèn ảnh màn hình (slide...) vào bản tóm tắt")
@@ -329,9 +334,17 @@ def main(argv=None) -> int:
     else:
         from .normalize import normalize, write_report
 
+        from .knowledge import Knowledge
+
+        kb = None if a.no_knowledge else Knowledge(a.knowledge)
         norm = normalize(asr, visual, user_gl, get_llm(), work, lang_name, a.verbatim, a.workers,
-                         do_review=not a.no_review, glossary_llm=get_llm("strong"))
+                         do_review=not a.no_review, glossary_llm=get_llm("strong"), kb=kb)
         write_json(nfile, norm)
+        if kb and not a.no_learn:
+            st = kb.learn(norm, visual, video.name, user_gl, llm=get_llm(), cache_dir=work / "normalize")
+            log(f"  Sổ tay: học {st.get('ung_ho', 0)}/{st.get('de_xuat', 0)} mục đề xuất ({st.get('moi', 0)} mới, "
+                f"{st.get('bi_loai', 0)} bị loại khi duyệt), {st.get('phan_bac', 0)} phản bác, "
+                f"{st.get('ghi_chu_moi', 0)} ghi chú thể loại mới → {kb.root / 'SO_TAY.md'}")
         stats = write_report(norm, out / "02_bao_cao_chuan_hoa.md", video.name, asr["model"], asr.get("repairs"))
         log(f"  sửa {stats['changed']} đoạn, xóa {stats['removed']}, {stats['uncertain']} chỗ cần kiểm tra lại")
     if not (out / "02_bao_cao_chuan_hoa.md").exists():

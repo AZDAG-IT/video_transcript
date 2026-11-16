@@ -40,6 +40,7 @@ ARG_VARS = {
     "VT_LLM_MODEL": "llm_model",
     "VT_LLM_STRONG_MODEL": "llm_strong_model",
     "VT_LLM_VISION_MODEL": "llm_vision_model",
+    "VT_KNOWLEDGE_DIR": "knowledge",
 }
 CHOICES = {
     "asr_backend": ("auto", "api", "local"),

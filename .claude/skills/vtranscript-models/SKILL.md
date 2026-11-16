@@ -21,7 +21,7 @@ Trả lời người dùng bằng tiếng Việt (người dùng xưng "anh", em
   - `VT_LLM_BACKEND` (`openrouter` | `claude-cli` | `anthropic`);
   - `VT_LLM_VISION_MODEL`: đọc khung hình;
   - `VT_LLM_STRONG_MODEL`: lập từ điển, 1 lượt gọi;
-  - `VT_LLM_MODEL`: sửa từng cụm, soát toàn cục, tóm tắt.
+  - `VT_LLM_MODEL`: phân tích thể loại/lĩnh vực, sửa từng cụm, soát toàn cục, duyệt sổ tay, tóm tắt.
 
 ## Quy tắc về key và tiền (bắt buộc)
 
@@ -55,8 +55,9 @@ Tổng: best khoảng $1, budget khoảng $0.6, cheap khoảng $0.5.
 4. Chạy:
    ```bash
    .venv/bin/vtranscript "<video>" -o output/_thu/<tên> --profile <tên> \
-       --reuse-from output/<bản tham chiếu> --skip-video
+       --reuse-from output/<bản tham chiếu> --skip-video --no-learn
    ```
+   - **Luôn thêm `--no-learn`** khi thử model. Nếu không, lần thử (model rẻ, có thể sửa sai) sẽ ghi vào sổ tay tự học chung. Đổi model ASR thì bản thô khác nên cùng một video bị tính như video mới, dễ đẩy mục sai lên "đang dùng". Cùng ASR thì học lại chỉ thay bằng chứng cũ của video đó. Muốn so cả sổ tay thì dùng kho riêng bằng `--knowledge output/_thu/kien_thuc`.
    - `--reuse-from` hardlink audio, khung hình và cache LLM theo từng lượt gọi. Nó chỉ lấy `asr_raw.json` khi cùng model ASR, và chỉ lấy `visual_context.json` khi cùng model vision. Vì vậy chỉ các bước đổi model mới tốn tiền.
    - Video dài thì chạy nền và theo dõi log, đừng chờ ở tiền cảnh.
 5. So sánh:
@@ -65,6 +66,7 @@ Tổng: best khoảng $1, budget khoảng $0.6, cheap khoảng $0.5.
        --out output/_thu/<tên>/so_sanh.md
    ```
    Có thể đưa nhiều lần thử vào cùng một bảng.
+   - Có phụ đề do người gõ thì chấm thẳng: `.venv/bin/vtranscript-bench ref <các lần chạy> --subs <file.vtt> [--offset S --dur S]` (WER thô/chuẩn hóa, % tên riêng đúng). Phụ đề tiếng Việt trên YouTube phần lớn là phụ đề tự động, không dùng làm đáp án được.
 6. Đọc kết quả, đừng chỉ nhìn một con số:
    - **Lệch sau chuẩn hóa:** đổi ASR thì dưới khoảng 5% là tương đương; Scribe thô so với bản chuẩn hóa của chính nó khoảng 5%. Chỉ đổi model LLM với cùng ASR thì nên dưới khoảng 3%.
    - **Nội dung bị mất:** khác 0% là dấu hiệu xấu; mở đúng các mốc thời gian được liệt kê.

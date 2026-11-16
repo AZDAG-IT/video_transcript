@@ -38,6 +38,9 @@ Các tùy chọn hay dùng (xem đủ bằng `--help`):
 - `--batch-size 4` hoặc `0`: giảm mức dùng VRAM nếu GPU báo hết bộ nhớ (chỉ với `--asr-backend local`).
 - `--skip-video`: chỉ tạo transcript và tóm tắt, không xuất video.
 - `--no-summary-images`: không chèn ảnh màn hình vào bản tóm tắt.
+- `--knowledge DIR`: thư mục sổ tay tự học (mặc định `VT_KNOWLEDGE_DIR`, không có thì `~/.config/vtranscript/kien_thuc`). Cả team dùng chung một kho thì trỏ tới thư mục dùng chung. Xem mục *Sổ tay tự học*.
+- `--no-learn`: vẫn dùng sổ tay nhưng không học thêm từ video này (ví dụ video thử, video chất lượng âm thanh quá kém).
+- `--no-knowledge`: không đọc và không ghi sổ tay. Luật theo thể loại có sẵn trong gói vẫn áp dụng.
 
 ## Quy trình xử lý
 
@@ -46,15 +49,60 @@ Các tùy chọn hay dùng (xem đủ bằng `--help`):
 3. **ASR**, có mốc thời gian và độ tin cậy từng từ. Có hai cách:
    - **Qua API (mặc định):** ElevenLabs Scribe v2 qua OpenRouter. Audio được chia thành các phần khoảng 20 phút, cắt ở chỗ lặng, gửi song song; kết quả từng phần được cache nên chạy lại không mất tiền lần nữa. OpenRouter chưa hỗ trợ truyền từ khóa (keyterms) cho Scribe, nên tên riêng do bước chuẩn hóa sửa.
    - **Trên máy:** faster-whisper, có VAD. Tên riêng tìm được ở bước 2 được dùng để mồi (hotwords). Quãng nào Whisper "ảo giác" (ví dụ "Hãy subscribe cho kênh…" đè lên lời nói thật) sẽ được tự phát hiện và nhận dạng lại ở chế độ cẩn thận hơn. Trên máy chỉ có CPU nên dùng `--asr-model large-v3-turbo`: nhanh hơn khoảng 2,7 lần và không bị ảo giác như large-v3 trong lần đo thử.
-4. **Chuẩn hóa 3 vòng**:
-   - **Vòng 1, lập từ điển**: đọc toàn bộ transcript cùng ngữ cảnh hình ảnh để xác định chủ đề, người nói, tên riêng và thuật ngữ, kèm các biến thể ASR hay nghe nhầm (ví dụ "pát nơ" → partner, "kê pi ai" → KPI).
-   - **Vòng 2, hiệu đính từng cụm** (khoảng 2.800 ký tự, có ngữ cảnh trước và sau, chạy song song). Vòng này sửa lỗi đồng âm, phiên âm tiếng Anh, tên riêng, chính tả, số liệu, dấu câu và viết hoa, đồng thời xóa ảo giác hoặc câu lặp của Whisper. Những từ Whisper nhận dạng kém tự tin được đánh dấu ‹ › để LLM soi kỹ hơn.
+4. **Chuẩn hóa**:
+   - **Vòng 0, phân tích** (model rẻ, 1 lượt gọi, khoảng $0.002): đọc trích đoạn transcript và chữ trên màn hình để nhận ra **thể loại video** (họp, đào tạo, bài giảng, phỏng vấn, livestream, tin tức, vlog, hoặc một thể loại mới do máy tự đặt), **lĩnh vực** và giọng vùng miền. Cùng lượt này, model xét từng gợi ý của sổ tay tự học **theo câu trích trong video** và chỉ giữ gợi ý hợp ngữ cảnh. Ví dụ "Gian" là tên người ở video họp nhưng "thời gian" ở video y tế không liên quan.
+   - **Vòng 1, lập từ điển** (model mạnh, 1 lượt gọi): đọc toàn bộ transcript cùng ngữ cảnh hình ảnh để xác định chủ đề, người nói, tên riêng và thuật ngữ, kèm các biến thể ASR hay nghe nhầm (ví dụ "pát nơ" → partner, "kê pi ai" → KPI). Gợi ý sổ tay đã qua vòng 0 được đưa vào để model cân nhắc.
+   - **Vòng 2, hiệu đính từng cụm** (khoảng 2.800 ký tự, có ngữ cảnh trước và sau, chạy song song). Vòng này sửa lỗi đồng âm, phiên âm tiếng Anh, tên riêng, chính tả, số liệu, dấu câu và viết hoa, đồng thời xóa ảo giác hoặc câu lặp của ASR. Những từ ASR nhận dạng kém tự tin được đánh dấu ‹ › để LLM soi kỹ hơn. Luật chung áp dụng cho mọi video và giữ nguyên từ địa phương; sau đó nối thêm luật riêng của thể loại vừa nhận ra.
    - **Vòng 3, soát toàn cục**: bắt chỗ viết không nhất quán giữa các cụm, lỗi còn sót và chỗ sửa quá tay (so lại với bản ASR gốc).
    - Chỗ không đủ căn cứ để sửa thì **giữ nguyên và đưa vào danh sách "Cần kiểm tra lại"** trong báo cáo, không đoán bừa.
+   - Xong bước chuẩn hóa, tool **cập nhật sổ tay** từ kết quả của video này: code đề xuất mục để học, một lượt model rẻ duyệt lại (khoảng $0.002) rồi mới ghi.
 5. **Tóm tắt** nội dung từ bản chuẩn hóa. Sau đó, với mỗi mục có mốc thời gian, tool chèn ảnh màn hình hiển thị lâu nhất trong quãng đó (slide, trang được chia sẻ). Khung chỉ có avatar hoặc màn hình trống được bỏ qua, và một màn hình không bị lặp lại ở nhiều mục. Bước này không gọi LLM.
 6. **Phụ đề**: căn từng từ của bản chuẩn hóa với mốc thời gian từng từ của ASR, chia câu tối đa 2 dòng × khoảng 42 ký tự, rồi in vào video (libass + libx264, giữ nguyên audio).
 
 Mọi bước đều có cache. Nếu bị ngắt giữa chừng, chạy lại đúng lệnh cũ là tool chạy tiếp từ chỗ dừng.
+
+## Sổ tay tự học
+
+Bước chuẩn hóa tự thích nghi với từng loại video và tự rút kinh nghiệm qua các video đã chạy, không cần người duyệt. Có 3 tầng:
+
+| Tầng | Nội dung | Ai sửa |
+|---|---|---|
+| 1. Luật lõi | Cách sửa chung cho mọi video: giữ nguyên ý, không thêm bớt nội dung, giữ từ địa phương, chỗ không chắc thì đánh dấu | Cố định trong code (`vtranscript/prompts.py`), máy không được sửa |
+| 2. Luật theo thể loại | Mỗi thể loại một file ngắn: họp, đào tạo, bài giảng, phỏng vấn, livestream, tin tức, vlog (`vtranscript/the_loai/*.md`). Video không hợp thể loại nào thì máy đặt mã thể loại mới. Máy thêm ghi chú văn phong rút ra từ các video cùng thể loại | Team sửa file `.md`; mã mới và ghi chú do máy tự thêm |
+| 3. Từ điển lỗi hay gặp | Cách viết đúng của tên riêng, thuật ngữ kèm các biến thể ASR hay nghe nhầm, có bằng chứng theo từng video | Máy tự học |
+
+**Chống khớp bừa.** Kho chỉ được dùng qua hai lớp lọc:
+
+1. Code tìm mục có chữ khớp trong transcript. Biến thể của tên người, tổ chức, sản phẩm có chữ hoa thì so đúng hoa/thường: "Gian" không khớp "thời gian". Mục còn là ứng viên chỉ được khớp khi biến thể đủ đặc trưng (nhiều từ, có số hoặc chữ hoa).
+2. Vòng 0 (model rẻ) đọc câu chứa chữ khớp và loại gợi ý không hợp ngữ cảnh. Chỉ gợi ý được giữ mới tới vòng 1 và vòng 2.
+
+**Cách máy học.** Sau mỗi video:
+
+- Code đề xuất mục để học: biến thể sai thật sự có trong bản ASR và bản cuối đã sửa nó thành cách viết đúng; hoặc tên riêng luôn viết đúng nhưng thấy trên màn hình.
+- Một lượt model rẻ **duyệt** từng đề xuất kèm câu ví dụ trước/sau khi sửa. Model loại từ thông dụng, chỗ chỉ đổi văn phong hay dấu câu, chỗ sửa sai, và biến thể không gần âm. Chỉ mục được duyệt mới tính là **ủng hộ**. Duyệt lỗi thì video đó không học mục nào.
+- Một video tính là **phản bác** khi vòng 0 đã xác nhận gợi ý hợp ngữ cảnh mà bản cuối vẫn để nguyên biến thể. Gợi ý bị vòng 0 loại thì không tính gì.
+- Trạng thái tự tính lại mỗi lần đọc:
+  - **đang dùng**: do người dùng khai trong `--glossary`, gặp ở ≥3 video, hoặc ≥2 video có căn cứ chắc (thấy trên màn hình hay model mạnh chắc chắn), và ít phản bác. Mục đang dùng được đưa thẳng vào bước sửa từng cụm, **chỉ khi video cùng lĩnh vực** và biến thể sai xuất hiện trong video đó.
+  - **ứng viên**: mới gặp. Chỉ đưa vào vòng 1 như gợi ý; model tự cân nhắc, có thể bỏ qua.
+  - **loại bỏ**: bị phản bác ở ≥2 video và nhiều hơn số video ủng hộ. Không dùng nữa.
+- Ghi chú thể loại: model lập từ điển đề xuất tối đa 2 ghi chú mỗi video (qua lượt duyệt mới được ghi) và xác nhận ghi chú cũ còn đúng. Ghi chú có hiệu lực khi ≥2 video cùng thể loại xác nhận; mỗi video dùng tối đa 5 ghi chú mạnh nhất.
+- Thể loại mới: khi không thể loại nào hợp, vòng 0 đặt mã mới (ví dụ `doc_truyen`) kèm mô tả. Mã này được ghi vào kho và đưa ra cho các video sau chọn; mã gần trùng mã cũ thì gộp. Máy không tự viết file luật: `SO_TAY.md` liệt kê các thể loại mới chưa có luật để team tạo `the_loai/<mã>.md` nếu muốn.
+
+**Kho** (mặc định `~/.config/vtranscript/kien_thuc/`):
+
+- `tu_dien.json`, `the_loai.json`: dữ liệu gốc.
+- `SO_TAY.md`: bản cho người đọc, sinh lại sau mỗi lần cập nhật. Đừng sửa tay.
+- `lich_su/`: ảnh chụp kho trước mỗi lần cập nhật (giữ 20 bản).
+- `the_loai/<thể loại>.md` (tùy chọn): luật của team, đè file cùng tên có sẵn trong gói.
+
+Nhiều lần chạy cùng ghi vào một kho thì có khóa file, không bị ghi đè lẫn nhau.
+
+```bash
+vtranscript-sotay xem                      # tóm tắt kho
+vtranscript-sotay xoa "big com"            # máy học sai: xóa mục và chặn không học lại
+vtranscript-sotay quay-lai                 # trả kho về bản trước lần cập nhật gần nhất
+vtranscript-sotay hoc output/<video> ...   # học từ các lần chạy đã có
+```
 
 ## Cài đặt
 
@@ -113,7 +161,7 @@ cp .env.example .env && chmod 600 .env   # rồi điền OPENROUTER_API_KEY
 | `VT_LLM_BACKEND` | Nơi gọi LLM | `--llm-backend` |
 | `VT_LLM_VISION_MODEL` | Đọc chữ trên khung hình | `--llm-vision-model` |
 | `VT_LLM_STRONG_MODEL` | Lập từ điển tên riêng, thuật ngữ (1 lượt gọi) | `--llm-strong-model` |
-| `VT_LLM_MODEL` | Sửa từng cụm, soát toàn cục, tóm tắt | `--llm-model` |
+| `VT_LLM_MODEL` | Phân tích thể loại/lĩnh vực, sửa từng cụm, soát toàn cục, duyệt sổ tay, tóm tắt | `--llm-model` |
 
 Mỗi lần chạy ghi chi phí thực tế (theo model) vào `output/<video>/_work/chi_phi.jsonl`. Bước nào lấy từ cache thì không tính tiền.
 
@@ -132,6 +180,14 @@ vtranscript-bench compare output/<video> output/_thu/budget --out output/_thu/so
 - `--reuse-from` lấy lại từ lần chạy cũ những gì không phụ thuộc model đang thử: audio, khung hình, kết quả ASR (nếu cùng model ASR), kết quả đọc khung hình (nếu cùng model vision) và cache từng lượt gọi LLM. Nhờ vậy chỉ trả tiền cho các bước thật sự đổi model.
 - Bảng so sánh gồm: model từng bước, **% lệch sau chuẩn hóa** so với bản tham chiếu, % nội dung bị mất (kèm mốc thời gian), số mục từ điển, số chỗ cần kiểm tra lại, số đoạn LLM lỗi, câu ảo giác còn sót, độ dài tóm tắt, chi phí; bảng đếm số lần xuất hiện từng tên riêng/thuật ngữ (⚠ khi lần thử thấp hơn 60% bản tham chiếu); 3 phút lệch nhiều nhất của mỗi lần thử để nghe lại.
 - Bản tham chiếu không phải sự thật tuyệt đối (chính nó còn khoảng 2% lỗi). Con số chỉ cho biết lần thử gần hay xa bản tốt nhất; vẫn cần đọc các phút lệch nhiều và bản tóm tắt.
+
+Có phụ đề do người gõ (`.vtt`/`.srt`) thì chấm thẳng với phụ đề đó:
+
+```bash
+vtranscript-bench ref output/_thu/a output/_thu/b --subs video.vi.vtt [--offset 120 --dur 240]
+```
+
+Bảng gồm tỉ lệ từ sai (WER) của bản ASR thô và bản chuẩn hóa, tỉ lệ tên riêng/thuật ngữ đúng, thể loại và lĩnh vực nhận ra, số gợi ý sổ tay. `--offset` và `--dur` dùng khi video đã cắt từ giây thứ `offset` của bản gốc. Lưu ý: phần lớn phụ đề tiếng Việt trên YouTube là phụ đề tự động, không dùng làm đáp án được.
 
 ## Chọn model và chi phí
 

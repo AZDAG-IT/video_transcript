@@ -1,4 +1,4 @@
-"""Chuẩn hóa transcript: từ điển -> hiệu đính từng cụm -> soát toàn cục -> báo cáo thay đổi."""
+"""Chuẩn hóa transcript: phân tích -> từ điển -> hiệu đính từng cụm -> soát toàn cục -> báo cáo thay đổi."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import knowledge as K
 from . import prompts as P
 from .llm import LLM, LLMError
 from .util import clean_spaces, fold, log, nfc, read_json, sha, ts, write_json
 
 LOW_CONF = 0.45  # xác suất từ (Whisper) dưới ngưỡng này được đánh dấu ‹ › để LLM soi kỹ
+ANALYZE_CHARS = 24_000  # lượt phân tích đọc trích đoạn tối đa chừng này ký tự (đầu, giữa, cuối video)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -78,6 +80,72 @@ def _chunks(segs: list[dict], max_chars: int) -> list[list[dict]]:
 
 
 # ----------------------------------------------------------------------------------------------
+# Vòng 0: phân tích (model rẻ) — thể loại, lĩnh vực, giọng; lọc gợi ý sổ tay theo ngữ cảnh
+# ----------------------------------------------------------------------------------------------
+
+
+def _excerpt(lines: list[str], max_chars: int, windows: int = 6) -> list[str]:
+    if sum(len(x) + 1 for x in lines) <= max_chars:
+        return lines
+    out, n, win = [], len(lines), max_chars // windows
+    for j in range(windows):
+        i, c = int(j * n / windows), 0
+        out.append("…")
+        while i < n and c < win:
+            out.append(lines[i])
+            c += len(lines[i]) + 1
+            i += 1
+    return out[1:]
+
+
+def _visual_summary(visual: dict | None) -> str:
+    out = []
+    for k, label in (("people", "Người"), ("organizations", "Tổ chức"), ("products", "Sản phẩm"), ("terms", "Thuật ngữ")):
+        xs = [x for x in (visual or {}).get(k) or [] if isinstance(x, str)][:25]
+        if xs:
+            out.append(f"{label}: " + ", ".join(xs))
+    sl = [x for x in (visual or {}).get("slide_lines") or [] if isinstance(x, str)][:25]
+    if sl:
+        out.append("Dòng trên slide: " + " | ".join(sl))
+    return "\n".join(out)
+
+
+def analyze(segs: list[dict], visual, kb, hits: list[dict], llm: LLM, cache_dir: Path, lang_name: str) -> dict:
+    """Một lượt model rẻ: thể loại (có sẵn hoặc mã mới), lĩnh vực, giọng; và xét từng gợi ý sổ tay theo câu trích
+    trong video này — chỉ gợi ý `ap_dung` được dùng tiếp. Lỗi thì coi như khác/khác và không dùng gợi ý nào."""
+    known = K.known_genres(kb)
+    hl = [dict(h, id=f"h{i + 1}") for i, h in enumerate(hits)]
+    prompt = P.analyze_prompt(lang_name, _excerpt([f"[{s['id']}] {s['text']}" for s in segs], ANALYZE_CHARS),
+                              _visual_summary(visual), known, hl)
+    f = cache_dir / f"analyze_{sha(P.ANALYZE_SYSTEM, prompt, llm.model)}.json"
+    res: dict = {}
+    try:
+        if f.exists():
+            res = read_json(f)
+        else:
+            log("  Vòng 0 — phân tích thể loại/lĩnh vực" + (f", xét {len(hl)} gợi ý sổ tay theo ngữ cảnh" if hl else "")
+                + "…")
+            res = llm.ask(prompt, system=P.ANALYZE_SYSTEM, schema=P.ANALYZE_SCHEMA, effort="medium", label="phân tích")
+            write_json(f, res)
+    except LLMError as e:
+        log(f"  ! Phân tích lỗi — dùng thể loại/lĩnh vực 'khác', không dùng gợi ý sổ tay: {e}")
+    genre = K.resolve_genre(res.get("genre", ""), known) if res else "khac"
+    verdict = {x.get("id"): x for x in res.get("hints") or []}
+    ok = {h["id"] for h in hl if verdict.get(h["id"], {}).get("verdict") == "ap_dung"}
+    return {
+        "topic": res.get("topic", ""),
+        "genre": genre,
+        "genre_desc": (res.get("genre_desc") or "").strip() if genre not in known else "",
+        "domain": res.get("domain") if res.get("domain") in P.DOMAINS else "khac",
+        "dialect": res.get("dialect", ""),
+        "accepted": [h for h in hl if h["id"] in ok],
+        "rejected": [{"key": h["key"], "canonical": h["canonical"], "bien_the": h["bien_the_gap"],
+                      "note": verdict.get(h["id"], {}).get("note") or "(không trả lời)"} for h in hl if h["id"] not in ok],
+        "error": not res,
+    }
+
+
+# ----------------------------------------------------------------------------------------------
 # Vòng 1: từ điển
 # ----------------------------------------------------------------------------------------------
 
@@ -88,6 +156,8 @@ def _merge_glossaries(parts: list[dict]) -> dict:
     merged = {
         "topic": " ".join(p.get("topic", "") for p in parts[:1]),
         "setting": parts[0].get("setting", ""),
+        "genre_notes_endorsed": list(dict.fromkeys(x for p in parts for x in p.get("genre_notes_endorsed", []))),
+        "genre_notes_new": list(dict.fromkeys(x for p in parts for x in p.get("genre_notes_new", []))),
         "style_notes": " ".join(dict.fromkeys(p.get("style_notes", "") for p in parts if p.get("style_notes"))),
         "speakers": list(dict.fromkeys(x for p in parts for x in p.get("speakers", []))),
         "entries": [],
@@ -104,7 +174,9 @@ def _merge_glossaries(parts: list[dict]) -> dict:
     return merged
 
 
-def build_glossary(marked: list[str], visual, user_gl, llm: LLM, cache_dir: Path, lang_name: str) -> dict:
+def build_glossary(marked: list[str], visual, user_gl, llm: LLM, cache_dir: Path, lang_name: str,
+                   so_tay: str = "") -> dict:
+    """`so_tay`: khối gợi ý từ sổ tay tự học (lỗi đã gặp + ghi chú thể loại), chèn vào prompt."""
     # Transcript rất dài thì chia phần (~120k ký tự) rồi gộp từ điển.
     parts, cur, n = [], [], 0
     for line in marked:
@@ -117,7 +189,7 @@ def build_glossary(marked: list[str], visual, user_gl, llm: LLM, cache_dir: Path
 
     results = []
     for i, lines in enumerate(parts):
-        prompt = P.glossary_prompt(lang_name, lines, visual, user_gl)
+        prompt = P.glossary_prompt(lang_name, lines, visual, user_gl, so_tay)
         key = sha(P.GLOSSARY_SYSTEM, prompt, llm.model)
         f = cache_dir / f"glossary_{i}_{key}.json"
         if f.exists():
@@ -307,8 +379,12 @@ def normalize(
     chunk_chars: int = 2800,
     do_review: bool = True,
     glossary_llm: LLM | None = None,
+    kb: K.Knowledge | None = None,
 ) -> dict:
-    """`glossary_llm`: model (mạnh) riêng cho bước lập từ điển; mặc định dùng `llm`."""
+    """`llm`: model rẻ cho phân tích, sửa từng cụm, soát. `glossary_llm`: model (mạnh) riêng cho bước lập từ điển;
+    mặc định dùng `llm`. `kb`: sổ tay tự học — gợi ý lỗi đã gặp (sau khi lượt phân tích lọc theo ngữ cảnh) và ghi
+    chú thể loại. None = không dùng kho (luật thể loại có sẵn trong gói vẫn áp dụng). Việc học từ kết quả do bên gọi
+    làm (kb.learn)."""
     glossary_llm = glossary_llm or llm
     cache_dir = work / "normalize"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -317,12 +393,23 @@ def normalize(
     n_low = sum(v.count(P.LOW_CONF_OPEN) for v in marked_by_id.values())
     log(f"Chuẩn hóa: {len(segs)} đoạn, {n_low} cụm từ ASR kém tự tin được đánh dấu để soi kỹ")
 
+    hits = kb.match([s["text"] for s in segs]) if kb else []
+    an = analyze(segs, visual, kb, hits, llm, cache_dir, lang_name)
+    genre, domain, acc = an["genre"], an["domain"], an["accepted"]
+    log(f"    thể loại: {genre}{' (mới: ' + an['genre_desc'] + ')' if an['genre_desc'] else ''}; lĩnh vực: {domain}"
+        + (f"; sổ tay: {len(hits)} mục khớp chữ, {len(acc)} hợp ngữ cảnh" if kb else ""))
+    pre = (f"## Phân tích sơ bộ\nThể loại: {K.genre_label(genre, kb)}"
+           f"{' — ' + an['genre_desc'] if an['genre_desc'] else ''} · lĩnh vực: {P.DOMAINS[domain]}"
+           + (f" · giọng: {an['dialect']}" if an["dialect"] else "") + "\n\n")
+    so_tay = pre + (K.hints_block(acc) + kb.notes_block(genre) if kb else "")
     gl = build_glossary([f"[{s['id']}] {marked_by_id[s['id']]}" for s in segs], visual, user_gl, glossary_llm, cache_dir,
-                        lang_name)
-    log(f"    từ điển: {len(gl['entries'])} mục; chủ đề: {gl.get('topic', '')[:160]}")
-    context = P.glossary_block(gl) + P.user_glossary_block(user_gl) + P.visual_block(visual, 80)
+                        lang_name, so_tay)
+    gl["genre"], gl["domain"] = genre, domain
+    log(f"    từ điển: {len(gl['entries'])} mục\n    chủ đề: {gl.get('topic', '')[:160]}")
+    extra = K.correct_block(acc, domain, gl) if kb else ""
+    context = P.glossary_block(gl) + extra + P.user_glossary_block(user_gl) + P.visual_block(visual, 80)
 
-    system = P.correct_system(lang_name, verbatim)
+    system = P.correct_system(lang_name, verbatim, K.genre_rules(genre, kb))
     fixed, uncertain, fallback = correct_chunks(segs, marked_by_id, context, llm, cache_dir, system, workers, chunk_chars)
     if fallback:
         log(f"  ! {len(fallback)} đoạn LLM không trả về — giữ nguyên bản gốc: {fallback[:20]}")
@@ -357,6 +444,10 @@ def normalize(
         "review_skipped": skipped,
         "fallback_ids": fallback,
         "llm": {"backend": llm.name, "model": llm.model, "glossary_model": glossary_llm.model},
+        "so_tay": {"the_loai": genre, "mo_ta_the_loai": an["genre_desc"], "linh_vuc": domain, "giong": an["dialect"],
+                   "phan_tich_loi": an["error"], "goi_y": [h["key"] for h in hits], "ap_dung": [h["key"] for h in acc],
+                   "khong_lien_quan": an["rejected"], "them_vao_buoc_sua": extra.count("\n- "),
+                   "kho": str(kb.root) if kb else None},
     }
 
 
@@ -391,11 +482,17 @@ def write_report(result: dict, path: Path, video_name: str, asr_model: str, asr_
     gl = result["glossary"]
     ll = result["llm"]
     gm = ll.get("glossary_model") or ll["model"]
+    st = result.get("so_tay") or {}
     L = [
         f"# Báo cáo chuẩn hóa transcript — {video_name}",
         "",
         f"- ASR: `{asr_model}` · LLM: `{ll['backend']}` / `{ll['model']}`"
         + (f" (từ điển: `{gm}`)" if gm != ll["model"] else ""),
+        f"- Thể loại: **{P.GENRES.get(g := gl.get('genre') or '?') or g + ' (mới: ' + (st.get('mo_ta_the_loai') or '') + ')'}**"
+        f" · lĩnh vực: **{P.DOMAINS.get(gl.get('domain'), gl.get('domain') or '?')}**"
+        + (f" · giọng: {st['giong']}" if st.get("giong") else "")
+        + (f" · sổ tay: {len(st.get('goi_y') or [])} mục khớp chữ, {len(st.get('ap_dung') or [])} hợp ngữ cảnh"
+           if st.get("kho") else ""),
         f"- Tổng số đoạn: **{len(segs)}** · đã sửa: **{len(changed)}** · đã xóa (ảo giác/lặp): **{len(removed)}** · "
         f"cần kiểm tra lại: **{len(result['uncertain'])}**",
         f"- Vòng soát toàn cục áp dụng thêm **{len(result['review_applied'])}** chỉnh sửa.",
@@ -429,7 +526,7 @@ def write_report(result: dict, path: Path, video_name: str, asr_model: str, asr_
 
     if asr_repairs:
         L += ["", "## Quãng ASR bị ảo giác đã nhận dạng lại", "",
-              "Whisper chèn câu bịa (vd. \"Hãy subscribe cho kênh…\") hoặc lặp câu ở các quãng dưới đây; tool đã nhận dạng "
+              "ASR chèn câu bịa (vd. \"Hãy subscribe cho kênh…\") hoặc lặp câu ở các quãng dưới đây; tool đã nhận dạng "
               "lại riêng từng quãng ở chế độ kỹ hơn.", "", "| Thời điểm | ASR lần đầu | Nhận dạng lại |", "|---|---|---|"]
         for r in asr_repairs:
             old_t = r["old"][:120].replace("|", "/") + ("…" if len(r["old"]) > 120 else "")

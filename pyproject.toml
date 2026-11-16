@@ -20,6 +20,7 @@ anthropic = ["anthropic>=0.70"]
 [project.scripts]
 vtranscript = "vtranscript.cli:main"
 vtranscript-bench = "vtranscript.bench:main"
+vtranscript-sotay = "vtranscript.knowledge:main"
 
 [build-system]
 requires = ["hatchling"]
