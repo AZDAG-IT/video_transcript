@@ -23,6 +23,8 @@ vtranscript "video.mp4" --glossary glossary.txt     # thêm từ điển tên ri
 vtranscript "video.mp4" --redo normalize            # chạy lại từ bước chuẩn hóa
 ```
 
+Gắn vào pipeline (mã thoát, chạy lại, kho sổ tay dùng chung, đọc kết quả JSON): xem [docs/TICH_HOP_CLI.md](docs/TICH_HOP_CLI.md).
+
 Lệnh `vtranscript` có sau khi cài gói (xem mục *Cài đặt*). Trong thư mục dự án thì kích hoạt môi trường trước (`source .venv/bin/activate`) hoặc gọi thẳng `.venv/bin/vtranscript`; `python -m vtranscript` cũng chạy được.
 
 Các tùy chọn hay dùng (xem đủ bằng `--help`):
